@@ -4,6 +4,8 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <ESPAsyncWebSrv.h>
+#include <Wire.h>
+#include "SparkFun_Qwiic_Relay.h"
 
 
 /*
@@ -16,39 +18,21 @@ const char* password = "";
 
 AsyncWebServer server(80);
 
-/*
 
-LED Pinouts
-D8 = 15
-D7 = 11
-D6 = 12
-D5 = 13   
-D4 = 14 
-D3 = 10
+#define RELAY_ADDR 0x6D
 
-D2a = 3
-D2b = 4
-D2c = 5
-
-Status LED
-D1 = 18 - control. Has 3.3V directly to it
-
-Switches
-SwUp = 37
-SwDown = 38
-SwLeft = 46
-SwRight = 35
-SwCenter = 36
-*/
+Qwiic_Relay quadRelay(RELAY_ADDR);
 
 
-const int relayPins[] = {15, 11, 12, 13, 10}; // Pins connected to relays
+const int relay5 = 12; // Pins connected to relays
 bool relayStatus[5] = {false, false, false, false, false}; // Initial relay statuses
+
+
 // Relay descriptions are configured in the config.h file
 
 
-const int buttonOnOff = 36;
-const int ledPower = 5;
+const int buttonOnOff = 27;
+const int ledPower = 33;
 
 
 hw_timer_t *timer0 = NULL;
@@ -62,31 +46,34 @@ void toggleSystem(bool status);
 
 
 void setup(void) {
+  Wire.begin();
   Serial.begin(115200);
+
 
   pinMode(buttonOnOff, INPUT_PULLUP);
 
   //three legs of the Power LED - active low
-  pinMode(3, OUTPUT);   //blue
-  pinMode(4, OUTPUT);   //green
   pinMode(ledPower, OUTPUT);   //red
 
 
   Serial.println("Turning off powerLED");   //active low
-  digitalWrite(3, HIGH);
-  digitalWrite(4, HIGH);
-  analogWrite(ledPower, 255);
+  analogWrite(ledPower, 0);
   
 
 
   // Initialize relay pins
-  for (int i = 0; i < 5; i++) {
-    pinMode(relayPins[i], OUTPUT);
-    setRelay(i, false);
+  Serial.println("Initializing the Relays");
+  pinMode(relay5, OUTPUT);
+  setRelay(4, false);   //relay 5, index 4
+
+  if (quadRelay.begin()) {
+    Serial.println("Quad relays ready for operation.");
+  } else {
+    Serial.println("THERE WAS A PROBLEM INITIALIZING THE RELAYS!!!");
   }
+  quadRelay.turnAllRelaysOff();
 
-
-
+  Serial.println("Starting Wifi");
   WiFi.mode(WIFI_STA);
 
 // Configures static IP address
@@ -241,13 +228,13 @@ void IRAM_ATTR onTimer0() {
   //timer overflow interrupt. Handle the power light blinking here
 
   static int fadeCount = 0;
-  if (digitalRead(10)) {
+  if (digitalRead(relay5)) {
     //the primary power relay is engaged - so we're on
-    fadeCount = 0;
+    fadeCount = 255;
   } else {
-    fadeCount -= 20;
-    if (fadeCount < 0) {
-      fadeCount = 400;    //set to a really high value so the light appears off for a bit before fading in.
+    fadeCount += 20;
+    if (fadeCount > 255) {
+      fadeCount = -200;    //set to a really low value so the light appears off for a bit before fading in.
     }
   }
 
@@ -255,8 +242,11 @@ void IRAM_ATTR onTimer0() {
   if (fadeCount >= 0 && fadeCount <= 255) {
     analogWrite(ledPower, fadeCount);
   } else {
-    if (fadeCount < 0) analogWrite(ledPower, 0);
-    else analogWrite(ledPower, 255);
+    if (fadeCount < 0) {
+      analogWrite(ledPower, 0);
+    } else {
+      analogWrite(ledPower, 255);
+    }
   }
 }
 /******************************************************************************************/
@@ -266,7 +256,31 @@ void notFound(AsyncWebServerRequest *request) {
 /******************************************************************************************/
 bool setRelay(int relay, bool status) {
   relayStatus[relay] = status;
-  digitalWrite(relayPins[relay], relayStatus[relay] ? HIGH : LOW);
+
+
+  if (relay == 4) {
+    //This is the digital output
+    Serial.println("Relay 5 Toggled");
+    digitalWrite(relay5, status ? HIGH : LOW);
+  } else {
+    //This is one of the Qwiic relays
+
+    Serial.print("Relay ");
+    Serial.print(relay);
+    Serial.println(" toggled.");
+
+    if (status) {
+      //turn on
+
+      quadRelay.turnRelayOn(relay + 1);
+      Serial.println("On");
+    } else {
+      //turn off
+      quadRelay.turnRelayOff(relay + 1);
+      Serial.println("Off");
+    }
+  }
+  
 
   return status;
 }
