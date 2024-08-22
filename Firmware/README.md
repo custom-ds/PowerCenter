@@ -15,7 +15,8 @@ The ESP32 controller used in this project is the Sparkfun ESP32 Thing Plus C. To
 platform, start by installing the board support tools.
 
 In the Boards Manager section of Arduino IDE, search for the esp32 by Espressif Systems boards, and click the Install 
-button.
+button. Note that you may need to downgrade to version 2.0.17 in order for the firmware to compile. There seems to be
+some sort of recent change in the 3.x line of firmware surrounding the hardware timer function timerBegin().
 
 There are some libraries that are required. Go to Tools and Manage Libraries. In the Search box, find and install these
 libraries:

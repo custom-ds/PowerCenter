@@ -1,5 +1,7 @@
 /* Power Center uses: Sparkfun ESP32 Thing Plus C */
 
+// The esp32 (by Espressif Systems) must be downgraded to version 2.0.17 in order for this firmware 
+//   to compile. This can be found in the Boards Manager section of Arduino IDE.
 
 // Add buildflag ASYNCWEBSERVER_REGEX to enable the regex support
 
@@ -14,6 +16,11 @@
 // compiler.cpp.extra_flags=-DASYNCWEBSERVER_REGEX=1
 //
 // Restart the IDE after making changes to the platform.local.txt file
+//
+// *** IMPORTANT ***
+// IF YOU FAIL TO DO THIS, THE REGEX ROUTES WILL NOT WORK BUT THE FIRMWARE *WILL* COMPILE WITHOUT COMPLAINTS.
+// THE SYMPTOMS WILL BE THAT THE ROUTES WILL NOT BE FOUND AND YOU WILL GET A 404 ERROR WHEN THE JAVASCRIPT API CALLS
+// ARE MADE.
 
 
 #include "config.h"
@@ -40,7 +47,7 @@ const char* password = "";
 */
 
 //Defines
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.1"
 #define PAGE_TITLE "W0ZC Power Center"
 
 #define RELAY_ADDR 0x6D
@@ -85,6 +92,8 @@ bool checkAPIKey(String key);
 void saveRelayName(int relay, String name);
 void factoryReset();
 void loadRelays();
+bool getRelayNoOff(int relay);
+void setRelayNoOff(int relay, bool state);
 void displayConfiguration();
 
 
@@ -221,6 +230,36 @@ void setup(void) {
 
       loadRelays();   //reload the relay names
       request->send(200, "text/plain", "Relay " + relay + " name saved");
+    } else {
+      request->send(400, "text/plain", "Invalid relay number");
+    }
+
+  });
+
+
+  // Server Route Handler: /api/{key}/set/relay/nooff/{relay}/{state}
+  server.on("^\\/api\\/([A-Z0-9]+)\\/set\\/relay\\/nooff\\/([0-9]+)\\/([0-1])$", HTTP_POST, [] (AsyncWebServerRequest *request) {
+    String apiKey = request->pathArg(0);
+    String relay = request->pathArg(1);
+    String state = request->pathArg(2);
+
+    int relayID = relay.toInt();
+    int stateID = state.toInt();
+
+    //Check the API key
+    if (!checkAPIKey(apiKey)) {
+      request->send(400, "text/plain", "API Request Denied. Valid key?");
+      return;
+    }
+
+    if (stateID < 0 || stateID > 1) {
+      request->send(400, "text/plain", "Invalid state");
+      return;
+    }
+
+    if (relayID >= 1 && relayID <= 5) {
+      setRelayNoOff(relayID, stateID);
+      request->send(200, "text/plain", "Relay " + relay + " nooff state set to " + state);
     } else {
       request->send(400, "text/plain", "Invalid relay number");
     }
@@ -507,7 +546,7 @@ void setSystem(int state) {
 /*
 Turns the system on or off. If state is 2, then toggle the system. If state is 1, turn the system on. If state is 0, turn the system off.
 */
-  int dly = 500;
+  int dly = 350;
 
   if (state == 2) {
     //figure out if it's already on or not
@@ -526,12 +565,16 @@ Turns the system on or off. If state is 2, then toggle the system. If state is 1
 
   } else {
     //turning things off
-    setRelay(5, 0);
-    delay(dly);
+    if (!getRelayNoOff(5)) {
+      setRelay(5, 0);
+      delay(dly); //extra delay before power relay
+    }
 
     for (int i=4;i>=1;i--) {
-      delay(dly);
-      setRelay(i, 0);
+      if (!getRelayNoOff(i)) {
+        delay(dly);
+        setRelay(i, 0);
+      }
     }
   }
 }
@@ -573,6 +616,12 @@ Reset the device to factory defaults. This will clear all settings and restore t
   prefs.putString("rly4", "Relay 4");
   prefs.putString("rly5", "Relay 5 - Power");
 
+  prefs.putBool("rly1nooff", false);
+  prefs.putBool("rly2nooff", false);
+  prefs.putBool("rly3nooff", false);
+  prefs.putBool("rly4nooff", false);
+  prefs.putBool("rly5nooff", false);
+
 
   //Reset the API key
   getAPIKey(true);    //force the creation of a new API key
@@ -600,6 +649,24 @@ Load the relay names from eeprom
 
 }
 /******************************************************************************************/
+bool getRelayNoOff(int relay) {
+/*
+Returns the state of the "Leave Powered On" checkbox for the relay. If true, leave the relay powered on during a shutdown command.
+*/
+
+  String key = "rly" + String(relay) + "nooff";
+  return prefs.getBool(key.c_str(), false);
+}
+/******************************************************************************************/
+void setRelayNoOff(int relay, bool state) {
+/*
+Sets the state of the "Leave Powered On" checkbox for the relay. If true, leave the relay powered on during a shutdown command.
+*/
+
+  String key = "rly" + String(relay) + "nooff";
+  prefs.putBool(key.c_str(), state);
+}
+/******************************************************************************************/
 void displayConfiguration() {
 /*
 Dumps all of the configuration information to the Serial port, including the API Key.
@@ -614,10 +681,15 @@ Dumps all of the configuration information to the Serial port, including the API
   Serial.println("");
 
   Serial.println("Relay 1:      " + relayDescriptions[0]);
+  Serial.println("  No Off:   " + String(getRelayNoOff(1)));
   Serial.println("Relay 2:      " + relayDescriptions[1]);
+  Serial.println("  No Off:   " + String(getRelayNoOff(2)));
   Serial.println("Relay 3:      " + relayDescriptions[2]);
+  Serial.println("  No Off:   " + String(getRelayNoOff(3)));
   Serial.println("Relay 4:      " + relayDescriptions[3]);
+  Serial.println("  No Off:   " + String(getRelayNoOff(4)));
   Serial.println("Relay 5:      " + relayDescriptions[4]);
+  Serial.println("  No Off:   " + String(getRelayNoOff(5)));
   Serial.println("");
 
   Serial.println("Wifi SSID:    " + WiFi.SSID());
@@ -771,22 +843,32 @@ String getPageConfiguration() {
             <div class="form-group">
                 <label for="relay1">Relay 1:</label>
                 <input type="text" class="form-control" id="relay1" name="relay1" maxlength="20" value="%RLY1%">
+                <input type="checkbox" class="form-check-input" id="relay1nooff" name="relay1nooff" %RLY1CHK%>
+                <label for="relay1nooff">Leave Powered On</label>
             </div>
             <div class="form-group">
                 <label for="relay2">Relay 2:</label>
                 <input type="text" class="form-control" id="relay2" name="relay2" maxlength="20" value="%RLY2%">
+                <input type="checkbox" class="form-check-input" id="relay2nooff" name="relay2nooff" %RLY2CHK%>
+                <label for="relay2nooff">Leave Powered On</label>
             </div>
             <div class="form-group">
                 <label for="relay3">Relay 3:</label>
                 <input type="text" class="form-control" id="relay3" name="relay3" maxlength="20" value="%RLY3%">
+                <input type="checkbox" class="form-check-input" id="relay3nooff" name="relay3nooff" %RLY3CHK%>
+                <label for="relay3nooff">Leave Powered On</label>
             </div>
             <div class="form-group">
                 <label for="relay">Relay 4:</label>
                 <input type="text" class="form-control" id="relay4" name="relay4" maxlength="20" value="%RLY4%">
+                <input type="checkbox" class="form-check-input" id="relay4nooff" name="relay4nooff" %RLY4CHK%>
+                <label for="relay4nooff">Leave Powered On</label>
             </div>
             <div class="form-group">
                 <label for="relay5">Relay 5 - High Power:</label>
                 <input type="text" class="form-control" id="relay5" name="relay5" maxlength="20" value="%RLY5%">
+                <input type="checkbox" class="form-check-input" id="relay5nooff" name="relay5nooff" %RLY5CHK%>
+                <label for="relay5nooff">Leave Powered On</label>
             </div>
 
             
@@ -824,6 +906,13 @@ String getPageConfiguration() {
   html.replace("%RLY4%", relayDescriptions[3]);
   html.replace("%RLY5%", relayDescriptions[4]);
 
+  //Checkboxes for leaving the relay powered on
+  html.replace("%RLY1CHK%", (getRelayNoOff(1) ? "checked" : ""));
+  html.replace("%RLY2CHK%", (getRelayNoOff(2) ? "checked" : ""));
+  html.replace("%RLY3CHK%", (getRelayNoOff(3) ? "checked" : ""));
+  html.replace("%RLY4CHK%", (getRelayNoOff(4) ? "checked" : ""));
+  html.replace("%RLY5CHK%", (getRelayNoOff(5) ? "checked" : ""));
+
   html.replace("%FIRMWARE%", FIRMWARE_VERSION);
 
 
@@ -849,6 +938,12 @@ function saveRelayNames() {
   setRelayName(3, document.getElementById('relay3').value);
   setRelayName(4, document.getElementById('relay4').value);
   setRelayName(5, document.getElementById('relay5').value);
+
+  setRelayNoOff(1, document.getElementById('relay1nooff').checked);
+  setRelayNoOff(2, document.getElementById('relay2nooff').checked);
+  setRelayNoOff(3, document.getElementById('relay3nooff').checked);
+  setRelayNoOff(4, document.getElementById('relay4nooff').checked);
+  setRelayNoOff(5, document.getElementById('relay5nooff').checked);
 }
 
 async function setRelayName(relay, name) {
@@ -869,6 +964,29 @@ async function setRelayName(relay, name) {
   } catch (error) {
       console.log(error);
       //alert('An error occurred');
+  }
+}
+
+async function setRelayNoOff(relay, state) {
+  try {
+    if (state) state = 1; else state = 0;
+
+    var uri = '/api/' + apiKey + '/set/relay/nooff/' + relay.toString() + '/' + state.toString();
+    //console.log(uri);
+
+    const response = await fetch(uri, {
+        method: 'POST'
+    });
+
+    if (response.ok) {
+        const result = await response.text();
+    } else {
+        alert('Error in API call.');
+    }
+
+  } catch (error) {
+      console.log(error);
+      alert('An error occurred');
   }
 }
 
