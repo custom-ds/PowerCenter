@@ -38,6 +38,10 @@
 //Qwiic i2c libraries
 #include "SparkFun_Qwiic_Relay.h"
 
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 
 /*
  * Wifi credentials are stored in config.h file. See the template.
@@ -47,7 +51,7 @@ const char* password = "";
 */
 
 //Defines
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.1.0"
 #define PAGE_TITLE "W0ZC Power Center"
 
 #define RELAY_ADDR 0x6D
@@ -58,6 +62,12 @@ Qwiic_Relay quadRelay(RELAY_ADDR);
 Preferences prefs;
 
 AsyncWebServer server(80);
+
+// Guards all access to the I2C bus (the Qwiic quad relay). loop() and the AsyncWebServer route
+// handlers run in different tasks and both touch Wire/quadRelay via setRelay()/setSystem();
+// without this mutex they can collide mid-transaction and wedge the I2C bus, which under heavy
+// network load (more frequent async callback scheduling) shows up as a hang -> watchdog reset.
+SemaphoreHandle_t i2cMutex;
 
 const int relay5 = 12; // Pins connected to relays
 bool relayStatus[5] = {false, false, false, false, false}; // Initial relay statuses
@@ -96,6 +106,8 @@ bool getRelayNoOff(int relay);
 void setRelayNoOff(int relay, bool state);
 void displayConfiguration();
 
+void printResetReason();
+
 
 void notFound(AsyncWebServerRequest *request);
 String getHeader();
@@ -110,6 +122,11 @@ void setup(void) {
   Wire.begin();
   Serial.begin(115200);
 
+  //Log why the last reset happened. If the device is rebooting unexpectedly, this tells us
+  //whether it's a watchdog, brownout, panic, etc. instead of having to guess.
+  printResetReason();
+
+  i2cMutex = xSemaphoreCreateMutex();
 
   //factoryReset();
 
@@ -164,8 +181,14 @@ void setup(void) {
     Serial.print(".");
   }
 
+  //Disable WiFi modem sleep. Power-save timing tends to interact badly with AsyncTCP when the
+  //channel is busy (e.g. heavy traffic from other devices on the same network), which is a
+  //common cause of ESP32 hangs/resets under network load even when traffic isn't addressed
+  //to this device.
+  WiFi.setSleep(false);
 
-  //configure the hardware timer 0. 
+
+  //configure the hardware timer 0.
   timer0 = timerBegin(0, 80, true);   //prescale is 80
   timerAttachInterrupt(timer0, &onTimer0, true);
   timerAlarmWrite(timer0, 100000, true);    //adjust period here. 100000 is 1/10 second
@@ -194,11 +217,17 @@ void setup(void) {
     }
 
     if (relayID >= 1 && relayID <= 5) {
+      //setRelay() touches the I2C-driven quad relay; take the same lock loop() uses so this
+      //can't interleave with a button-driven system state change on the other task.
+      xSemaphoreTake(i2cMutex, portMAX_DELAY);
       setRelay(relayID, stateID);
+      xSemaphoreGive(i2cMutex);
       request->send(200, "text/plain", "Relay " + relay + " state set to " + state);
     } else if (relayID == 0) {
       //Toggle the system on or off.
+      xSemaphoreTake(i2cMutex, portMAX_DELAY);
       setSystem(stateID);
+      xSemaphoreGive(i2cMutex);
       request->send(200, "text/plain", "System state set to " + state);
     } else {
       request->send(400, "text/plain", "API Request Denied. Valid key?");
@@ -371,12 +400,18 @@ void loop(void) {
   }
 
   if (buttonHold > 0) {
+    //Hold the I2C bus for the whole button-driven state change so an AsyncWebServer route
+    //handler can't interleave a Wire transaction with this one (see i2cMutex comment above).
+    xSemaphoreTake(i2cMutex, portMAX_DELAY);
+
     //see if it was a short hold - to turn on
     if (buttonHold < 10) {
       setSystem(1);
     } else {
       setSystem(0);
     }
+
+    xSemaphoreGive(i2cMutex);
   }
 
 
@@ -704,6 +739,29 @@ Dumps all of the configuration information to the Serial port, including the API
   // Serial.println("Subnet Mask:  " + WiFi.subnetMask());
   // Serial.println("Primary DNS:  " + WiFi.dnsIP(0));
   // Serial.println("Secondary DNS:" + WiFi.dnsIP(1));
+}
+/******************************************************************************************/
+void printResetReason() {
+/*
+Prints why the chip last reset (power-on, watchdog, brownout, panic, etc.) to the Serial port.
+If the device is rebooting unexpectedly in the field, capturing this at the next boot tells us
+which subsystem to look at instead of guessing.
+*/
+  String reason;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   reason = "Power-on reset"; break;
+    case ESP_RST_EXT:       reason = "External pin reset"; break;
+    case ESP_RST_SW:        reason = "Software reset (esp_restart)"; break;
+    case ESP_RST_PANIC:     reason = "Software panic / exception (crash)"; break;
+    case ESP_RST_INT_WDT:   reason = "Interrupt watchdog (a task held interrupts/a critical section too long)"; break;
+    case ESP_RST_TASK_WDT:  reason = "Task watchdog (a task didn't yield/finish in time)"; break;
+    case ESP_RST_WDT:       reason = "Other watchdog"; break;
+    case ESP_RST_DEEPSLEEP: reason = "Woke from deep sleep"; break;
+    case ESP_RST_BROWNOUT:  reason = "Brownout (supply voltage dropped too low)"; break;
+    case ESP_RST_SDIO:      reason = "SDIO reset"; break;
+    default:                reason = "Unknown"; break;
+  }
+  Serial.println("Reset reason: " + reason);
 }
 /******************************************************************************************/
 
